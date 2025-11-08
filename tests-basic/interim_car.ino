@@ -9,7 +9,7 @@ MPU6050 mpu(Wire);
 const int IN1 = 16;
 const int IN2 = 17;
 const int IN3 = 19;
-const int IN4 = 13;  // Avoid I2C conflict
+const int IN4 = 13;
 
 // Ultrasonic pins
 const int trigFront = 32, echoFront = 33;
@@ -29,6 +29,8 @@ const unsigned long timeout = 5000;
 enum MovementState { STOPPED, MOVING_FORWARD, MOVING_BACKWARD, TURNING_LEFT, TURNING_RIGHT };
 MovementState currentState = STOPPED;
 
+float currentPitch = 0.0;
+
 void setup() {
   Serial.begin(115200);
   SerialBT.begin("ESP32_Car");
@@ -44,7 +46,7 @@ void setup() {
   pinMode(irFront, INPUT);
   pinMode(irRear, INPUT);
 
-  Wire.begin(21, 22);  // ESP32 I2C pins
+  Wire.begin(21, 22);
 
   byte status = mpu.begin();
   Serial.print(F("MPU6050 status: "));
@@ -64,10 +66,10 @@ void setup() {
 
 void loop() {
   mpu.update();
-  float pitch = mpu.getAngleX();
+  currentPitch = mpu.getAngleY();
 
-  if (abs(pitch) > tiltThreshold) {
-    Serial.print("Tilt detected ("); Serial.print(pitch); Serial.println("°)! Forcing forward.");
+  if (abs(currentPitch) > tiltThreshold) {
+    Serial.print("Tilt detected ("); Serial.print(currentPitch); Serial.println("°)! Forcing forward.");
     moveForward();
     delay(500);
     return;
@@ -83,7 +85,6 @@ void loop() {
     stopCar();
   }
 
-  // Continuous obstacle detection while moving
   switch (currentState) {
     case MOVING_FORWARD:
       if (isFrontBlocked()) {
@@ -113,7 +114,7 @@ void loop() {
       break;
   }
 
-  delay(100);  // Responsive loop
+  delay(100);
 }
 
 // ---- Movement functions with state tracking ----
@@ -147,10 +148,10 @@ void turnLeft() {
     Serial.println("Obstacle on left! Turn blocked.");
     return;
   }
-  digitalWrite(IN1, LOW);  digitalWrite(IN2, HIGH);  // Left motor backward
-  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);   // Right motor forward
+  digitalWrite(IN1, LOW);  digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
   currentState = TURNING_LEFT;
-  Serial.println("Turning left (pivot)");
+  Serial.println("Turning left");
 }
 
 void turnRight() {
@@ -159,10 +160,10 @@ void turnRight() {
     Serial.println("Obstacle on right! Turn blocked.");
     return;
   }
-  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);   // Left motor forward
-  digitalWrite(IN3, LOW);  digitalWrite(IN4, HIGH);  // Right motor backward
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);  digitalWrite(IN4, HIGH);
   currentState = TURNING_RIGHT;
-  Serial.println("Turning right (pivot)");
+  Serial.println("Turning right");
 }
 
 void stopCar() {
@@ -188,24 +189,33 @@ float readDistance(int trigPin, int echoPin) {
   digitalWrite(trigPin, LOW); delayMicroseconds(2);
   digitalWrite(trigPin, HIGH); delayMicroseconds(10);
   digitalWrite(trigPin, LOW);
-  long duration = pulseIn(echoPin, HIGH, 30000);  // timeout: 30ms
-
+  long duration = pulseIn(echoPin, HIGH, 30000);
   float distance = duration * 0.034 / 2;
-  if (duration == 0 || distance <= 0.5) return -1.0;  // Invalid reading
+  if (duration == 0 || distance <= 0.5) return -1.0;
   return distance;
 }
 
 bool isFrontBlocked() {
   float d = readDistance(trigFront, echoFront);
-  return (d > 0 && d < 15) || digitalRead(irFront) == LOW;
+  bool irBlocked = false;
+  if (currentPitch >= 30.0 && currentPitch <= 50.0) {
+    irBlocked = digitalRead(irFront) == LOW;
+  }
+  return (d > 0 && d < 15) || irBlocked;
 }
+
 bool isRearBlocked() {
-  return digitalRead(irRear) == LOW;
+  if (currentPitch >= 30.0 && currentPitch <= 50.0) {
+    return digitalRead(irRear) == LOW;
+  }
+  return false;
 }
+
 bool isLeftBlocked() {
   float d = readDistance(trigLeft, echoLeft);
   return (d > 0 && d < 15);
 }
+
 bool isRightBlocked() {
   float d = readDistance(trigRight, echoRight);
   return (d > 0 && d < 15);
