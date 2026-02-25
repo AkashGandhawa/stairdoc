@@ -17,7 +17,7 @@ BluetoothSerial SerialBT;
 #define EN2_R 0
 
 // Ultrasonic sensor pins
-#define trigFront 32
+#define trigFront 327
 #define echoFront 33
 #define trigRear 15
 #define echoRear 4
@@ -72,10 +72,6 @@ void setup() {
   pinMode(EN1_R, OUTPUT); pinMode(EN1_L, OUTPUT);
   pinMode(EN2_R, OUTPUT); pinMode(EN2_L, OUTPUT);
 
-  // Enable motor drivers
-  digitalWrite(EN1_R, HIGH); digitalWrite(EN1_L, HIGH);
-  digitalWrite(EN2_R, HIGH); digitalWrite(EN2_L, HIGH);
-
   // Set ultrasonic sensor pins
   pinMode(trigFront, OUTPUT); pinMode(echoFront, INPUT);
   pinMode(trigRear, OUTPUT);  pinMode(echoRear, INPUT);
@@ -90,13 +86,18 @@ void setup() {
   SerialBT.begin("InterimRobot");  // Device name
   Serial.println("Bluetooth initialized. Robot ready.");
 
-  stopMotors();  // Ensure motors are off at startup
-
   // Initialize servos
   servo1.attach(SERVO_PIN);
   servo2.attach(SERVO_PIN);
   servo1.write(0);
   servo2.write(0);
+
+  stopMotors();  // Ensure motors are off at startup
+  delay(500);
+
+  // Enable motor drivers
+  digitalWrite(EN1_R, HIGH); digitalWrite(EN1_L, HIGH);
+  digitalWrite(EN2_R, HIGH); digitalWrite(EN2_L, HIGH);
 }
 
 void loop() {
