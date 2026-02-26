@@ -1,4 +1,3 @@
-#include <ESP32Servo.h>     
 #include <Wire.h>
 #include <MPU6050_light.h>
 #include <BluetoothSerial.h>
@@ -29,11 +28,6 @@ BluetoothSerial SerialBT;
 // Bump sensor pins
 #define bumpLeft 34
 #define bumpRight 35
-
-// Servo pin
-#define SERVO_PIN 18
-Servo servo1;
-Servo servo2;
 
 char command = '\0';  // Stores the latest Bluetooth command
 
@@ -85,12 +79,6 @@ void setup() {
   // Initialize  Bluetooth
   SerialBT.begin("InterimRobot");  // Device name
   Serial.println("Bluetooth initialized. Robot ready.");
-
-  // Initialize servos
-  servo1.attach(SERVO_PIN);
-  servo2.attach(SERVO_PIN);
-  servo1.write(0);
-  servo2.write(0);
 
   stopMotors();  // Ensure motors are off at startup
   delay(500);
@@ -174,36 +162,6 @@ void loop() {
   else if (command == 'l') turnLeft();
   else if (command == 'r') turnRight();
   else if (command == 's') stopMotors();
-  else if (command == 'u') {
-    if(armCount == 0){
-      Serial.println("Servo sweep up (0→180)");
-      armCount++;
-      for (int pos = 0; pos <= 180; pos += 5) {
-        servo1.write(pos);
-        servo2.write(pos);
-        delay(50);
-      }
-    }else if(armCount == 75){
-      armCount = 0;
-    }else{
-      armCount++;
-    }
-  }
-  else if (command == 'd') {
-    if(armCount == 0){
-      Serial.println("Servo sweep down (180→0)");
-      armCount++;
-      for (int pos = 180; pos >= 0; pos -= 5) {
-        servo1.write(pos);
-        servo2.write(pos);
-        delay(50);
-      }
-    }else if(armCount == 75){
-      armCount = 0;
-    }else{
-      armCount++;
-    }
-  }
 }
 
 // Motor control functions
