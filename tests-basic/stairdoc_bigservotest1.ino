@@ -1,5 +1,3 @@
-Stairdoc bigservo
-
 #include <Wire.h>
 #include <Adafruit_PWMServoDriver.h>
 #include <BluetoothSerial.h>
@@ -7,91 +5,84 @@ Stairdoc bigservo
 BluetoothSerial SerialBT;
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
 
-// PCA9685 channels for 4 DS3218 servos
 #define SERVO_1 0
-#define SERVO_2 1
-#define SERVO_3 2
-#define SERVO_4 3
 
-// Pulse range for DS3218 (adjust if needed)
-#define SERVO_MIN 150   // ~500 µs
-#define SERVO_MAX 600   // ~2500 µs
+#define SERVO_MIN 150
+#define SERVO_MAX 600
 
-char command = '\0';
+char command;
 
 void setup() {
+
   Serial.begin(115200);
   SerialBT.begin("ServoTest");
-  Serial.println("4x DS3218 Servo Test Ready");
 
-  Wire.begin(21, 22);  // ESP32 I2C pins
+  Serial.println("ESP32 Servo Control Ready");
+
+  Wire.begin(21,22);
 
   pwm.begin();
-  pwm.setPWMFreq(50);  // Standard servo frequency
-  delay(10);
+  pwm.setPWMFreq(50);
 
-  // Initialize all servos to 0°
-  setServoAngle(SERVO_1, 0);
-  setServoAngle(SERVO_2, 0);
-  setServoAngle(SERVO_3, 0);
-  setServoAngle(SERVO_4, 0);
+  delay(100);
+
+  setServoAngle(SERVO_1,0);
 }
 
 void loop() {
 
   if (SerialBT.available()) {
+
     command = SerialBT.read();
 
-    Serial.print("Command: ");
+    Serial.print("Command received: ");
     Serial.println(command);
 
-    if (command == 'u') {
-      Serial.println("Moving servos UP (0 -> 180)");
-      sweepServos(0, 180);
+    switch(command){
+
+      case 'u':
+        Serial.println("Moving UP");
+        sweepServo(SERVO_1,0,180);
+      break;
+
+      case 'd':
+        Serial.println("Moving DOWN");
+        sweepServo(SERVO_1,180,0);
+      break;
+
     }
 
-    if (command == 'd') {
-      Serial.println("Moving servos DOWN (180 -> 0)");
-      sweepServos(180, 0);
-    }
   }
 }
 
-// Set servo angle
-void setServoAngle(uint8_t servo, int angle) {
+void setServoAngle(int servo,int angle){
 
-  angle = constrain(angle, 0, 180);
+  angle = constrain(angle,0,180);
 
-  int pulse = map(angle, 0, 180, SERVO_MIN, SERVO_MAX);
+  int pulse = map(angle,0,180,SERVO_MIN,SERVO_MAX);
 
-  pwm.setPWM(servo, 0, pulse);
+  pwm.setPWM(servo,0,pulse);
 }
 
-// Sweep all servos together
-void sweepServos(int startAngle, int endAngle) {
+void sweepServo(int servo,int startAngle,int endAngle){
 
-  if (startAngle < endAngle) {
+  if(startAngle < endAngle){
 
-    for (int pos = startAngle; pos <= endAngle; pos += 5) {
+    for(int pos=startAngle; pos<=endAngle; pos+=5){
 
-      setServoAngle(SERVO_1, pos);
-      setServoAngle(SERVO_2, pos);
-      setServoAngle(SERVO_3, pos);
-      setServoAngle(SERVO_4, pos);
-
-      delay(50);
+      setServoAngle(servo,pos);
+      delay(40);
     }
 
-  } else {
-
-    for (int pos = startAngle; pos >= endAngle; pos -= 5) {
-
-      setServoAngle(SERVO_1, pos);
-      setServoAngle(SERVO_2, pos);
-      setServoAngle(SERVO_3, pos);
-      setServoAngle(SERVO_4, pos);
-
-      delay(50);
-    }
   }
+  else{
+
+    for(int pos=startAngle; pos>=endAngle; pos-=5){
+
+      setServoAngle(servo,pos);
+      delay(40);
+    }
+
+  }
+
 }
