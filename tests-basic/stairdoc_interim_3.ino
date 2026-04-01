@@ -100,7 +100,7 @@ void setup() {
   pinMode(bumpRight, INPUT);
 
   // Initialize Bluetooth (single device name)
-  SerialBT.begin("InterimRobot");  // Device name
+  SerialBT.begin("StairdocRobot");  // Device name
   Serial.println("Bluetooth initialized. Robot + servos ready.");
 
   stopMotors();  // Ensure motors are off at startup
