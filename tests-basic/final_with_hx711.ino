@@ -45,8 +45,8 @@ HX711 scale;
 #define SERVO_MAX  600   // conservative endpoint (ticks)
 
 //---HX711--
-const int LOADCELL_DOUT_PIN = 25;
-const int LOADCELL_SCK_PIN = 36;
+const int LOADCELL_DOUT_PIN = 36;
+const int LOADCELL_SCK_PIN = 25;
 
 // --- Globals ---
 char command = '\0';               // latest Bluetooth command
