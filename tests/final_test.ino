@@ -55,6 +55,7 @@ bool pitchOverride = false;
 unsigned long lastCmdTime = 0;
 const unsigned long timeout = 10000;
 float calibration_factor = 433.65;
+bool mpuActive = false;
 
 enum MovementState { STOPPED,
                      FORWARD,
@@ -71,12 +72,15 @@ void setup() {
   Wire.begin(21, 22);
 
   byte status = mpu.begin();
-  while (status != 0) {
-    Serial.println("MPU6050 not responding. Check wiring.");
-    delay(1000);
-    status = mpu.begin();
+  if (status != 0) {
+    Serial.println("MPU6050 not responding. Servo Arms Disabled\nCheck MPU6050 connection and reset to enable servo arms");
+  }else{
+    mpuActive = true;
   }
-  mpu.calcOffsets();
+
+  if(mpuActive){
+    mpu.calcOffsets();
+  }
 
   pwm.begin();
   pwm.setPWMFreq(50);
@@ -124,8 +128,10 @@ void setup() {
 
 // ---------------------- Loop ----------------------
 void loop() {
-  mpu.update();
-  pitch = mpu.getAngleY();
+  if(mpuActive){ 
+    mpu.update();
+    pitch = mpu.getAngleY();
+  }
 
   long frontDist = readUltrasonic(trigFront, echoFront);
   long rearDist = readUltrasonic(trigRear, echoRear);
@@ -134,8 +140,10 @@ void loop() {
   long frontLeftStair = readUltrasonic(trigLeft, echoLeft);
   long rearStair = readUltrasonic(trigRight, echoRight);
 
-  Serial.print("Pitch (Y-angle): ");
-  Serial.println(pitch);
+  if(mpuActive){
+    Serial.print("Pitch (Y-angle): ");
+    Serial.println(pitch);
+  }
   Serial.print("Front: ");
   Serial.print(frontDist);
   Serial.print(" cm | Rear: ");
@@ -177,15 +185,17 @@ void loop() {
     return;
   }
 
-  if (abs(pitch) > 50 && frontDist > 20) {
-    moveForward();
-    pitchOverride = true;
-    return;
-  }
+  if(mpuActive){
+    if (abs(pitch) > 50 && frontDist > 20) {
+      moveForward();
+      pitchOverride = true;
+      return;
+    }
 
-  if (pitchOverride && abs(pitch) <= 50) {
-    stopMotors();
-    pitchOverride = false;
+    if (pitchOverride && abs(pitch) <= 50) {
+      stopMotors();
+      pitchOverride = false;
+    }
   }
 
   if ((command == 'f' && frontDist <= 20) || (command == 'b' && rearDist <= 20)) {
