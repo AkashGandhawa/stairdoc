@@ -25,9 +25,9 @@ HX711 scale;
 #define echoFront 33
 #define trigRear 15
 #define echoRear 4
-#define trigLeft 26  // repurposed as front-left stair sensor
+#define trigLeft 26
 #define echoLeft 27
-#define trigRight 14  // repurposed as rear stair sensor
+#define trigRight 14
 #define echoRight 12
 
 // --- Bump sensor pins ---
@@ -35,10 +35,10 @@ HX711 scale;
 #define bumpRight 35
 
 // --- PCA9685 servo driver channels ---
-#define FRONT_LEFT_CH 0
-#define FRONT_RIGHT_CH 1
-#define REAR_LEFT_CH 2
-#define REAR_RIGHT_CH 3
+#define FRONT_LEFT_CH 0   // DS3218
+#define FRONT_RIGHT_CH 1  // DS3218
+#define REAR_LEFT_CH 2    // DS3218
+#define REAR_RIGHT_CH 3   // TD8120
 
 // --- Servo pulse endpoints ---
 #define SERVO_MIN 150
@@ -56,13 +56,29 @@ unsigned long lastCmdTime = 0;
 const unsigned long timeout = 10000;
 float calibration_factor = 433.65;
 bool mpuActive = false;
+bool robotMoving = false;
 
-enum MovementState { STOPPED,
-                     FORWARD,
-                     BACKWARD,
-                     LEFT,
-                     RIGHT };
+enum MovementState { STOPPED, FORWARD, BACKWARD, LEFT, RIGHT };
 MovementState currentState = STOPPED;
+
+// --- Non-blocking timing helpers ---
+unsigned long lastHX711Read = 0;
+unsigned long lastStairRead = 0;
+unsigned long lastMotionUltrasonicRead = 0;
+
+// --- Unified sweep state ---
+bool sweepingRear = false;
+int sweepStartAngle = 0;
+int sweepEndAngle = 0;
+int sweepPos = 0;
+unsigned long lastSweepUpdate = 0;
+const unsigned long sweepInterval = 50; // ms between steps
+
+// DS3218 timing
+unsigned long ds3218StartTime = 0;
+const unsigned long ds3218Duration = 1000; // ms to approximate 180° rotation
+bool ds3218Active = false;
+int ds3218Direction = 0; // +1 = CCW, -1 = CW
 
 // ---------------------- Setup ----------------------
 void setup() {
@@ -74,20 +90,14 @@ void setup() {
   byte status = mpu.begin();
   if (status != 0) {
     Serial.println("MPU6050 not responding. Servo Arms Disabled\nCheck MPU6050 connection and reset to enable servo arms");
-  }else{
+  } else {
     mpuActive = true;
-  }
-
-  if(mpuActive){
     mpu.calcOffsets();
   }
 
   pwm.begin();
   pwm.setPWMFreq(50);
   delay(10);
-
-  setFrontAngle(0);
-  setRearAngle(0);
 
   pinMode(RPWM1, OUTPUT);
   pinMode(LPWM1, OUTPUT);
@@ -133,29 +143,45 @@ void loop() {
     pitch = mpu.getAngleY();
   }
 
-  long frontDist = readUltrasonic(trigFront, echoFront);
-  long rearDist = readUltrasonic(trigRear, echoRear);
+  // Motion ultrasonic sensors (only when moving)
+  if(robotMoving && millis() - lastMotionUltrasonicRead >= 100) {
+    long frontDist = readUltrasonic(trigFront, echoFront);
+    long rearDist = readUltrasonic(trigRear, echoRear);
 
-  // Repurposed ultrasonic sensors for stair detection
-  long frontLeftStair = readUltrasonic(trigLeft, echoLeft);
-  long rearStair = readUltrasonic(trigRight, echoRight);
+    Serial.print("Front: ");
+    Serial.print(frontDist);
+    Serial.print(" cm | Rear: ");
+    Serial.print(rearDist);
+    Serial.println(" cm");
 
-  if(mpuActive){
-    Serial.print("Pitch (Y-angle): ");
-    Serial.println(pitch);
+    lastMotionUltrasonicRead = millis();
   }
-  Serial.print("Front: ");
-  Serial.print(frontDist);
-  Serial.print(" cm | Rear: ");
-  Serial.print(rearDist);
-  Serial.println(" cm");
 
-  Serial.print("Front-Left Stair Sensor: ");
-  Serial.print(frontLeftStair);
-  Serial.print(" cm | Front-Right Stair Sensor: ");
-  Serial.print(rearStair);
-  Serial.println(" cm");
+  // Stair sensors (once per minute)
+  if(millis() - lastStairRead >= 60000) {
+    long frontLeftStair = readUltrasonic(trigLeft, echoLeft);
+    long rearStair = readUltrasonic(trigRight, echoRight);
 
+    Serial.print("Front-Left Stair Sensor: ");
+    Serial.print(frontLeftStair);
+    Serial.print(" cm | Front-Right Stair Sensor: ");
+    Serial.print(rearStair);
+    Serial.println(" cm");
+
+    lastStairRead = millis();
+  }
+
+  // HX711 (only when stopped, every 5s)
+  if(!robotMoving && millis() - lastHX711Read >= 5000) {
+    scale.set_scale(calibration_factor);
+    Serial.print("Reading: ");
+    Serial.print(scale.get_units(), 1);
+    Serial.print(" g | Calibration Factor: ");
+    Serial.println(calibration_factor);
+    lastHX711Read = millis();
+  }
+
+  // Bluetooth commands
   if (SerialBT.available()) {
     command = SerialBT.read();
     lastCmdTime = millis();
@@ -164,19 +190,30 @@ void loop() {
 
     if (command == 'u') {
       Serial.println("Sweeping front servos up");
-      sweepFrontPair(0, 180);
+      startDS3218Rotation(false); // CCW timed rotation
     } else if (command == 'd') {
       Serial.println("Sweeping front servos down");
-      sweepFrontPair(180, 0);
+      startDS3218Rotation(true);  // CW timed rotation
     } else if (command == 'v') {
       Serial.println("Sweeping rear servos up");
-      sweepRearPair(0, 180);
+      startDS3218Rotation(false);
+      sweepingRear = true;
+      sweepStartAngle = 0;
+      sweepEndAngle = 180;
+      sweepPos = 0;
+      lastSweepUpdate = millis();
     } else if (command == 'e') {
       Serial.println("Sweeping rear servos down");
-      sweepRearPair(180, 0);
+      startDS3218Rotation(true);
+      sweepingRear = true;
+      sweepStartAngle = 180;
+      sweepEndAngle = 0;
+      sweepPos = 180;
+      lastSweepUpdate = millis();
     }
   }
 
+  // Bump sensors
   if (digitalRead(bumpLeft) == LOW || digitalRead(bumpRight) == LOW) {
     stopMotors();
     delay(200);
@@ -186,22 +223,15 @@ void loop() {
     return;
   }
 
+  // Pitch override
   if(mpuActive){
-    if (abs(pitch) > 50 && frontDist > 20) {
+    if (abs(pitch) > 50) {
       moveForward();
       pitchOverride = true;
-      return;
-    }
-
-    if (pitchOverride && abs(pitch) <= 50) {
+    } else if (pitchOverride && abs(pitch) <= 50) {
       stopMotors();
       pitchOverride = false;
     }
-  }
-
-  if ((command == 'f' && frontDist <= 20) || (command == 'b' && rearDist <= 20)) {
-    stopMotors();
-    return;
   }
 
   if (millis() - lastCmdTime > timeout) {
@@ -215,14 +245,7 @@ void loop() {
   else if (command == 'r') turnRight();
   else if (command == 's') stopMotors();
 
-  delay(50);
-
-  scale.set_scale(calibration_factor);
-  Serial.print("Reading: ");
-  Serial.print(scale.get_units(), 1);
-  Serial.print(" g | Calibration Factor: ");
-  Serial.println(calibration_factor);
-
+  // Calibration factor adjustment
   if (Serial.available()) {
     char temp = Serial.read();
     if (temp == '+' || temp == 'a') calibration_factor += 10;
@@ -230,15 +253,19 @@ void loop() {
     else if (temp == 's') calibration_factor += 100;
     else if (temp == 'x') calibration_factor -= 100;
   }
+
+  // Update sweeps
+  updateSweeps();
 }
 
-// ---------------------- Motor control functions ----------------------
+ // ---------------------- Motor control functions ----------------------
 void stopMotors() {
   analogWrite(RPWM1, 0);
   analogWrite(LPWM1, 0);
   analogWrite(RPWM2, 0);
   analogWrite(LPWM2, 0);
   currentState = STOPPED;
+  robotMoving = false;
 }
 
 void moveForward() {
@@ -247,6 +274,7 @@ void moveForward() {
   analogWrite(RPWM2, 255);
   analogWrite(LPWM2, 0);
   currentState = FORWARD;
+  robotMoving = true;
 }
 
 void moveBackward() {
@@ -255,6 +283,7 @@ void moveBackward() {
   analogWrite(RPWM2, 0);
   analogWrite(LPWM2, 255);
   currentState = BACKWARD;
+  robotMoving = true;
 }
 
 void turnLeft() {
@@ -263,6 +292,7 @@ void turnLeft() {
   analogWrite(RPWM2, 255);
   analogWrite(LPWM2, 0);
   currentState = LEFT;
+  robotMoving = true;
 }
 
 void turnRight() {
@@ -271,6 +301,7 @@ void turnRight() {
   analogWrite(RPWM2, 0);
   analogWrite(LPWM2, 255);
   currentState = RIGHT;
+  robotMoving = true;
 }
 
 // ---------------------- Ultrasonic helper ----------------------
@@ -285,56 +316,53 @@ long readUltrasonic(int trigPin, int echoPin) {
 }
 
 // ---------------------- Servo helpers ----------------------
-void setServoAngle(uint8_t channel, int angle) {
+
+// DS3218 continuous rotation style (timed relative motion)
+void setDS3218Speed(uint8_t channel, int speed) {
+  int pulse = map(speed, -100, 100, 1000, 2000); 
+  pwm.setPWM(channel, 0, pulse);
+}
+
+void startDS3218Rotation(bool clockwise) {
+  ds3218Active = true;
+  ds3218Direction = clockwise ? -1 : 1;
+  ds3218StartTime = millis();
+  int speed = clockwise ? -100 : 100;
+  setDS3218Speed(FRONT_LEFT_CH, speed);
+  setDS3218Speed(FRONT_RIGHT_CH, -speed); // complementary
+  setDS3218Speed(REAR_LEFT_CH, speed);
+}
+
+// TD8120 positional style
+void setTD8120Angle(uint8_t channel, int angle) {
   angle = constrain(angle, 0, 180);
   int pulse = map(angle, 0, 180, SERVO_MIN, SERVO_MAX);
   pwm.setPWM(channel, 0, pulse);
 }
 
-void setFrontAngle(int angle) {
-  angle = constrain(angle, 0, 180);
-  int comp = 180 - angle;
-  setServoAngle(FRONT_LEFT_CH, angle);
-  setServoAngle(FRONT_RIGHT_CH, comp);
-}
-
-void setRearAngle(int angle) {
-  angle = constrain(angle, 0, 180);
-  int comp = 180 - angle;
-  setServoAngle(REAR_LEFT_CH, angle);
-  setServoAngle(REAR_RIGHT_CH, comp);
-}
-
-// Sweep both front servos together
-void sweepFrontPair(int startAngle, int endAngle) {
-  if (startAngle < endAngle) {
-    for (int pos = startAngle; pos <= endAngle; pos += 5) {
-      setServoAngle(FRONT_LEFT_CH, pos);
-      setServoAngle(FRONT_RIGHT_CH, 180 - pos);
-      delay(50);
-    }
-  } else {
-    for (int pos = startAngle; pos >= endAngle; pos -= 5) {
-      setServoAngle(FRONT_LEFT_CH, pos);
-      setServoAngle(FRONT_RIGHT_CH, 180 - pos);
-      delay(50);
-    }
+// Unified sweep update
+void updateSweeps() {
+  // DS3218 timed rotation
+  if(ds3218Active && millis() - ds3218StartTime >= ds3218Duration) {
+    setDS3218Speed(FRONT_LEFT_CH, 0);
+    setDS3218Speed(FRONT_RIGHT_CH, 0);
+    setDS3218Speed(REAR_LEFT_CH, 0);
+    ds3218Active = false;
   }
-}
 
-// Sweep both rear servos together
-void sweepRearPair(int startAngle, int endAngle) {
-  if (startAngle < endAngle) {
-    for (int pos = startAngle; pos <= endAngle; pos += 5) {
-      setServoAngle(REAR_LEFT_CH, pos);
-      setServoAngle(REAR_RIGHT_CH, 180 - pos);
-      delay(50);
+  // TD8120 positional sweep
+  if(sweepingRear && millis() - lastSweepUpdate >= sweepInterval) {
+    if(sweepStartAngle < sweepEndAngle) {
+      if(sweepPos <= sweepEndAngle) {
+        setTD8120Angle(REAR_RIGHT_CH, sweepPos);
+        sweepPos += 5;
+      } else sweepingRear = false;
+    } else {
+      if(sweepPos >= sweepEndAngle) {
+        setTD8120Angle(REAR_RIGHT_CH, sweepPos);
+        sweepPos -= 5;
+      } else sweepingRear = false;
     }
-  } else {
-    for (int pos = startAngle; pos >= endAngle; pos -= 5) {
-      setServoAngle(REAR_LEFT_CH, pos);
-      setServoAngle(REAR_RIGHT_CH, 180 - pos);
-      delay(50);
-    }
+    lastSweepUpdate = millis();
   }
 }
