@@ -152,8 +152,9 @@ void loop() {
 
   Serial.print("Front-Left Stair Sensor: ");
   Serial.print(frontLeftStair);
-  Serial.print(" cm | Rear Stair Sensor: ");
-  Serial.println(rearStair);
+  Serial.print(" cm | Front-Right Stair Sensor: ");
+  Serial.print(rearStair);
+  Serial.println(" cm");
 
   if (SerialBT.available()) {
     command = SerialBT.read();
