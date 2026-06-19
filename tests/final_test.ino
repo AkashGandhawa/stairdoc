@@ -84,7 +84,7 @@ int rearSweepEnd = 0;  // target angle for rear sweep
 unsigned long lastRearUpdate = 0;
 
 // --- Sweep timing ---
-const unsigned long sweepInterval = 50;  // ms between servo updates
+const unsigned long sweepInterval = 20;  // ms between servo updates
 
 // ---------------------- Setup ----------------------
 void setup() {
@@ -388,9 +388,9 @@ void updateSweeps() {
     setTD8120Angle(REAR_RIGHT_CH, 180 - rearSweepPos);
 
     if (rearSweepPos < rearSweepEnd) {
-      rearSweepPos += 3;
+      rearSweepPos += 1;
     } else if (rearSweepPos > rearSweepEnd) {
-      rearSweepPos -= 3;
+      rearSweepPos -= 1;
     } else {
       sweepingRear = false;
     }
