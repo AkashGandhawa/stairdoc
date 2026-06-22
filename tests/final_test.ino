@@ -188,20 +188,20 @@ void moveBackward() {
 
 void turnLeft() {
   enableMotors();
-  digitalWrite(RPWM1, HIGH);
-  digitalWrite(LPWM1, LOW);
-  digitalWrite(RPWM2, HIGH);
-  digitalWrite(LPWM2, LOW);
+  digitalWrite(RPWM1, LOW);
+  digitalWrite(LPWM1, HIGH);
+  digitalWrite(RPWM2, LOW);
+  digitalWrite(LPWM2, HIGH);
   currentState = LEFT;
   robotMoving = true;
 }
 
 void turnRight() {
   enableMotors();
-  digitalWrite(RPWM1, LOW);
-  digitalWrite(LPWM1, HIGH);
-  digitalWrite(RPWM2, LOW);
-  digitalWrite(LPWM2, HIGH);
+  digitalWrite(RPWM1, HIGH);
+  digitalWrite(LPWM1, LOW);
+  digitalWrite(RPWM2, HIGH);
+  digitalWrite(LPWM2, LOW);
   currentState = RIGHT;
   robotMoving = true;
 }
@@ -219,7 +219,7 @@ long readUltrasonic(int trigPin, int echoPin) {
 // ---------------------- Setup ----------------------
 void setup() {
   Serial.begin(115200);
-  Serial.println("Full Robot Init...");
+  Serial.println("Stairdoc Robot Init...");
 
   // Motor pins
   pinMode(RPWM1, OUTPUT);
@@ -271,7 +271,7 @@ void setup() {
   // pinMode(echoRight, INPUT);
 
   // Bluetooth
-  SerialBT.begin("FullRobotTester");
+  SerialBT.begin("Robot | StairDoc");
   Serial.println("Bluetooth ready. Motors OFF, servos initialized.");
 
   // MPU6050 init
@@ -299,7 +299,9 @@ void loop() {
     mpu.update();
     pitch = mpu.getAngleY();
     Serial.print("Pitch: ");
-    Serial.println(pitch);
+    Serial.print(pitch);
+    Serial.print(" | ");
+    Serial.println(abs(pitch));
   }
 
   // Ultrasonic obstacle check (every 100ms when moving)
@@ -369,6 +371,7 @@ void loop() {
   if (mpuActive) {
     if (abs(pitch) > 50) {
       moveForward();
+      delay(2000);
       pitchOverride = true;
     } else if (pitchOverride && abs(pitch) <= 50) {
       stopMotors();
