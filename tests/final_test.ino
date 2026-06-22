@@ -245,10 +245,14 @@ void setup() {
   pwm.setPWMFreq(50);
 
   // Initialize servos to safe positions
-  setDS3218Angle(FRONT_LEFT_CH, 0);
-  setDS3218Angle(FRONT_RIGHT_CH, 180);
-  setDS3218Angle(REAR_LEFT_CH, 0);
-  setTD8120Angle(REAR_RIGHT_CH, 180);
+  // setDS3218Angle(FRONT_LEFT_CH, 0);
+  // setDS3218Angle(FRONT_RIGHT_CH, 180);
+  // setDS3218Angle(REAR_LEFT_CH, 0);
+  // setTD8120Angle(REAR_RIGHT_CH, 180);
+  setDS3218Angle(FRONT_LEFT_CH, 90);
+  setDS3218Angle(FRONT_RIGHT_CH, 90);
+  setDS3218Angle(REAR_LEFT_CH, 90);
+  setTD8120Angle(REAR_RIGHT_CH, 90);
 
   // Ultrasonic pins
   pinMode(trigFront, OUTPUT);
@@ -294,6 +298,8 @@ void loop() {
   if (mpuActive) {
     mpu.update();
     pitch = mpu.getAngleY();
+    Serial.print("Pitch: ");
+    Serial.println(pitch);
   }
 
   // Ultrasonic obstacle check (every 100ms when moving)
@@ -312,20 +318,20 @@ void loop() {
 
     if (command == 'u') {
       sweepingFront = true;
-      frontSweepPos = 0;
+      frontSweepPos = 90;
       frontSweepEnd = 180;
     } else if (command == 'd') {
       sweepingFront = true;
       frontSweepPos = 180;
-      frontSweepEnd = 0;
+      frontSweepEnd = 90;
     } else if (command == 'v') {
       sweepingRear = true;
-      rearSweepPos = 0;
-      rearSweepEnd = 180;
+      rearSweepPos = 90;
+      rearSweepEnd = 0;
     } else if (command == 'e') {
       sweepingRear = true;
-      rearSweepPos = 180;
-      rearSweepEnd = 0;
+      rearSweepPos = 0;
+      rearSweepEnd = 90;
     } else if (command == 'f') moveForward();
     else if (command == 'b') moveBackward();
     else if (command == 'l') turnLeft();
