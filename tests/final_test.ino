@@ -55,19 +55,19 @@ MPU6050 mpu(Wire);
 #define trigRear 15
 #define echoRear 4
 
-// --- Stair sensors (commented out) ---
-// #define trigLeft 26
-// #define echoLeft 27
-// #define trigRight 14
-// #define echoRight 12
+// --- Stair sensors
+#define trigLeft 26
+#define echoLeft 27
+#define trigRight 14
+#define echoRight 12
 
 // --- Bump sensor pins ---
 #define bumpLeft 34
 #define bumpRight 35
 
-// --- HX711 pins (commented out) ---
-// const int LOADCELL_DOUT_PIN = 36;
-// const int LOADCELL_SCK_PIN = 25;
+// --- HX711 pins ---
+const int LOADCELL_DOUT_PIN = 36;
+const int LOADCELL_SCK_PIN = 25;
 
 // --- Globals ---
 char command = '\0';
@@ -103,7 +103,7 @@ int rearSweepEnd = 0;
 unsigned long lastRearUpdate = 0;
 
 // --- Sweep timing ---
-const unsigned long sweepInterval = 20;  // ms between updates
+const unsigned long sweepInterval = 30;  // ms between updates
 // ---------------------- Servo helpers ----------------------
 void setDS3218Angle(uint8_t channel, int angle) {
   angle = constrain(angle, 0, 180);
@@ -264,11 +264,11 @@ void setup() {
   pinMode(bumpLeft, INPUT);
   pinMode(bumpRight, INPUT);
 
-  // Stair sensors (commented out)
-  // pinMode(trigLeft, OUTPUT);
-  // pinMode(echoLeft, INPUT);
-  // pinMode(trigRight, OUTPUT);
-  // pinMode(echoRight, INPUT);
+  // Stair sensors
+  pinMode(trigLeft, OUTPUT);
+  pinMode(echoLeft, INPUT);
+  pinMode(trigRight, OUTPUT);
+  pinMode(echoRight, INPUT);
 
   // Bluetooth
   SerialBT.begin("Robot | StairDoc");
@@ -321,18 +321,18 @@ void loop() {
     if (command == 'u') {
       sweepingFront = true;
       frontSweepPos = 90;
-      frontSweepEnd = 180;
+      frontSweepEnd = 135;
     } else if (command == 'd') {
       sweepingFront = true;
-      frontSweepPos = 180;
+      frontSweepPos = 135;
       frontSweepEnd = 90;
     } else if (command == 'v') {
       sweepingRear = true;
       rearSweepPos = 90;
-      rearSweepEnd = 0;
+      rearSweepEnd = 45;
     } else if (command == 'e') {
       sweepingRear = true;
-      rearSweepPos = 0;
+      rearSweepPos = 45;
       rearSweepEnd = 90;
     } else if (command == 'f') moveForward();
     else if (command == 'b') moveBackward();
