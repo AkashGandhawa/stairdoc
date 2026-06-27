@@ -1,27 +1,5 @@
 /*
 ===========================================================
-FULL ROBOT CODE (Safe Initialization)
-
-Included:
- - Servo control (DS3218 + TD8120) with sweeps
- - Motor driver pins, initialization, and movement functions
- - Bluetooth commands for servos + motors
- - Ultrasonic obstacle detection (front/rear)
- - Bump sensor logic
- - Pitch override using MPU6050
- - Command timeout safety
-
-Commented out (not needed yet):
- - Stair detection ultrasonic sensors (left/right)
- - HX711 load cell code
-===========================================================
-*/
-
-#include <Wire.h>
-#include <Adafruit_PWMServoDriver.h>
-#include <BluetoothSerial.h>
-/*
-===========================================================
 FULL ROBOT CODE (Safe Initialization + Staircase Flag)
 
 Included:
@@ -33,6 +11,8 @@ Included:
  - Pitch override using MPU6050
  - Command timeout safety
  - Staircase flag alters thresholds and bump behavior
+ - Global speed percentage (default 60%)
+ - Servo angle persistence in ESP32 flash (restored only if tilted >10°)
 
 Commented out (not needed yet):
  - Stair detection ultrasonic sensors (left/right)
@@ -40,15 +20,21 @@ Commented out (not needed yet):
 ===========================================================
 */
 
+#define DEBUG  // comment this out to disable debug prints
+//TODO: comment out the DEBUG definition before testing with battery
+
 #include <Wire.h>
 #include <Adafruit_PWMServoDriver.h>
 #include <BluetoothSerial.h>
 #include <MPU6050_light.h>
+#include <Preferences.h>
+#include "HX711.h"
 
-// --- Shared objects ---
+// Shared objects
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
 BluetoothSerial SerialBT;
 MPU6050 mpu(Wire);
+Preferences prefs;
 
 // --- Motor control pins (BTS7960) ---
 #define LPWM1 16
@@ -92,13 +78,27 @@ enum MovementState { STOPPED,
                      RIGHT };
 MovementState currentState = STOPPED;
 
+// HX711 pins (your actual wiring)
+#define LOADCELL_DOUT_PIN 36  // DT pin
+#define LOADCELL_SCK_PIN 25   // SCK pin
+
+// HX711 object (same name as old code)
+HX711 hx711;
+
+// Calibration values
+long tareOffset = 0;
+float calibrationFactor = 1.0;  // adjust after calibration
+
 float pitch = 0.0;
 bool pitchOverride = false;
 bool mpuActive = false;
 
+// Timing and distance variables
 long frontDist = 0, rearDist = 0;
 unsigned long lastMotionUltrasonicRead = 0;
 unsigned long lastCmdTime = 0;
+unsigned long lastUltrasonicCheck = 0; 
+unsigned long lastServoSave = 0;
 const unsigned long timeout = 10000;  // 10s safety timeout
 
 unsigned long bumpTime = 0;
@@ -108,15 +108,22 @@ bool bumpRecovering = false;
 bool nearStaircase = true;   // For testing, set true in setup
 int obstacleThreshold = 20;  // Will be set to 3 if near staircase
 
+// --- Speed control ---
+int speedPercent = 60;  // default speed percentage
+
+// --- Servo persistence ---
+unsigned long servoSaveTimeout = 10000;  // 10s timeout
+unsigned long lastServoChangeTime = 0;
+
 // --- Sweep state ---
 bool sweepingFront = false;
-int frontSweepPos = 90;        // current angle
-int frontSweepEnd = 90;        // target angle
+int frontSweepPos = 90;  // current angle
+int frontSweepEnd = 90;  // target angle
 unsigned long lastFrontUpdate = 0;
 
 bool sweepingRear = false;
-int rearSweepPos = 90;         // current angle
-int rearSweepEnd = 90;         // target angle
+int rearSweepPos = 90;  // current angle
+int rearSweepEnd = 90;  // target angle
 unsigned long lastRearUpdate = 0;
 
 // --- Sweep timing ---
@@ -124,11 +131,14 @@ const unsigned long sweepInterval = 30;  // ms between updates
 
 // ---------------------- Servo helpers ----------------------
 
-// DS3218 servo (front)
 void setDS3218Angle(uint8_t channel, int angle) {
   angle = constrain(angle, 0, 180);
   uint32_t pulseWidthMicros = map(angle, 0, 180, DS3218_USMIN, DS3218_USMAX);
   pwm.writeMicroseconds(channel, pulseWidthMicros);
+
+#ifdef DEBUG
+  Serial.printf("DS3218 channel %d -> %d° (pulse %lu)\n", channel, angle, pulseWidthMicros);
+#endif
 }
 
 // TD8120 servo (rear)
@@ -136,12 +146,34 @@ void setTD8120Angle(uint8_t channel, int angle) {
   angle = constrain(angle, 0, 180);
   int pulse = map(angle, 0, 180, TD8120_MIN, TD8120_MAX);
   pwm.setPWM(channel, 0, pulse);
+
+#ifdef DEBUG
+  Serial.printf("TD8120 channel %d -> %d° (pulse %d)\n", channel, angle, pulse);
+#endif
 }
 
 // --- Step rules ---
 // Front servos: range 0–90
 // Rear servos: range 90–0
 // Steps: 15° in outer ranges, 5° in 30–60 range
+
+// NEW VERSION (simplified with constrain)
+int getTargetStep(int current, bool front, bool increase) {
+  if (front) {
+    if (current < 30) return constrain(current + (increase ? 15 : -15), 0, 30);
+    else if (current < 60) return constrain(current + (increase ? 5 : -5), 30, 60);
+    else if (current < 90) return constrain(current + (increase ? 15 : -15), 60, 90);
+    else return current;
+  } else {  // rear: range 90–0
+    if (current > 60) return constrain(current + (increase ? -15 : 15), 60, 90);
+    else if (current > 30) return constrain(current + (increase ? -5 : 5), 30, 60);
+    else if (current > 0) return constrain(current + (increase ? -15 : 15), 0, 30);
+    else return current;
+  }
+}
+
+/* 
+// ORIGINAL VERSION (kept for reference)
 int getTargetStep(int current, bool front, bool increase) {
   if (front) {
     if (current < 30) return increase ? min(current + 15, 30) : max(current - 15, 0);
@@ -155,9 +187,43 @@ int getTargetStep(int current, bool front, bool increase) {
     else return current;
   }
 }
+*/
 
 // --- Sweep update ---
 // Moves 1° per iteration toward target
+// NEW VERSION (using constrain, moves 1° per iteration)
+void updateSweeps() {
+  unsigned long now = millis();
+
+  if (sweepingFront && (now - lastFrontUpdate >= sweepInterval)) {
+    setDS3218Angle(FRONT_LEFT_CH, frontSweepPos);
+    setDS3218Angle(FRONT_RIGHT_CH, 180 - frontSweepPos);
+
+    // Move one degree toward target
+    frontSweepPos = constrain(frontSweepPos + (frontSweepPos < frontSweepEnd ? 1 : (frontSweepPos > frontSweepEnd ? -1 : 0)), 0, 90);
+
+    if (frontSweepPos == frontSweepEnd) sweepingFront = false;
+
+    lastFrontUpdate = now;
+    lastServoChangeTime = now;  // mark change for persistence
+  }
+
+  if (sweepingRear && (now - lastRearUpdate >= sweepInterval)) {
+    setDS3218Angle(REAR_LEFT_CH, rearSweepPos);
+    setTD8120Angle(REAR_RIGHT_CH, 180 - rearSweepPos);
+
+    // Move one degree toward target
+    rearSweepPos = constrain(rearSweepPos + (rearSweepPos < rearSweepEnd ? 1 : (rearSweepPos > rearSweepEnd ? -1 : 0)), 0, 90);
+
+    if (rearSweepPos == rearSweepEnd) sweepingRear = false;
+
+    lastRearUpdate = now;
+    lastServoChangeTime = now;  // mark change for persistence
+  }
+}
+
+/* 
+// --- ORIGINAL VERSION (kept for reference) ---
 void updateSweeps() {
   unsigned long now = millis();
 
@@ -170,6 +236,7 @@ void updateSweeps() {
     else sweepingFront = false;
 
     lastFrontUpdate = now;
+    lastServoChangeTime = now;
   }
 
   if (sweepingRear && (now - lastRearUpdate >= sweepInterval)) {
@@ -181,182 +248,304 @@ void updateSweeps() {
     else sweepingRear = false;
 
     lastRearUpdate = now;
+    lastServoChangeTime = now;
   }
 }
+*/
 
 // ---------------------- Motor control ----------------------
+// Enable motor driver pins
 void enableMotors() {
-  digitalWrite(EN1_R, HIGH);
   digitalWrite(EN1_L, HIGH);
-  digitalWrite(EN2_R, HIGH);
+  digitalWrite(EN1_R, HIGH);
   digitalWrite(EN2_L, HIGH);
+  digitalWrite(EN2_R, HIGH);
+
+#ifdef DEBUG
+  Serial.println("Motor drivers enabled");
+#endif
 }
 
+// Stop all motors and disable drivers
 void stopMotors() {
-  digitalWrite(RPWM1, LOW);
-  digitalWrite(LPWM1, LOW);
-  digitalWrite(RPWM2, LOW);
-  digitalWrite(LPWM2, LOW);
+  // Stop PWM outputs
+  ledcWrite(0, 0);
+  ledcWrite(1, 0);
+  ledcWrite(2, 0);
+  ledcWrite(3, 0);
 
-  digitalWrite(EN1_R, LOW);
+  // Disable motor driver pins
   digitalWrite(EN1_L, LOW);
-  digitalWrite(EN2_R, LOW);
+  digitalWrite(EN1_R, LOW);
   digitalWrite(EN2_L, LOW);
+  digitalWrite(EN2_R, LOW);
 
   currentState = STOPPED;
   robotMoving = false;
+
+#ifdef DEBUG
+  Serial.println("Motors stopped and drivers disabled");
+#endif
 }
 
+// Move robot forward
 void moveForward() {
-  enableMotors();
-  digitalWrite(RPWM1, LOW);
-  digitalWrite(LPWM1, HIGH);
-  digitalWrite(RPWM2, HIGH);
-  digitalWrite(LPWM2, LOW);
+  enableMotors();  // ensure drivers are active
+
+  int duty = (speedPercent * 255) / 100;  // scale duty cycle
+
+  // Right motor forward
+  ledcWrite(0, 0);
+  ledcWrite(1, duty);
+
+  // Left motor forward
+  ledcWrite(2, duty);
+  ledcWrite(3, 0);
+
   currentState = FORWARD;
   robotMoving = true;
+
+#ifdef DEBUG
+  Serial.printf("Moving forward at %d%% speed (duty %d)\n", speedPercent, duty);
+#endif
 }
 
+// Move robot backward
 void moveBackward() {
-  enableMotors();
-  digitalWrite(RPWM1, HIGH);
-  digitalWrite(LPWM1, LOW);
-  digitalWrite(RPWM2, LOW);
-  digitalWrite(LPWM2, HIGH);
+  enableMotors();  // ensure drivers are active
+
+  int duty = (speedPercent * 255) / 100;  // scale duty cycle
+
+  // Right motor backward
+  ledcWrite(0, duty);
+  ledcWrite(1, 0);
+
+  // Left motor backward
+  ledcWrite(2, 0);
+  ledcWrite(3, duty);
+
   currentState = BACKWARD;
   robotMoving = true;
+
+#ifdef DEBUG
+  Serial.printf("Moving backward at %d%% speed (duty %d)\n", speedPercent, duty);
+#endif
 }
 
-void turnLeft() {
-  enableMotors();
-  digitalWrite(RPWM1, HIGH);
-  digitalWrite(LPWM1, LOW);
-  digitalWrite(RPWM2, HIGH);
-  digitalWrite(LPWM2, LOW);
-  currentState = LEFT;
+// Turn robot left or right
+// direction = LEFT or RIGHT (enum values)
+void turn(int direction) {
+  enableMotors();  // ensure drivers are active
+
+  int duty = (speedPercent * 255) / 100;  // scale duty cycle
+
+  if (direction == LEFT) {
+    // Both motors backward on one side, forward on the other
+    ledcWrite(0, duty);  // Right motor backward
+    ledcWrite(1, 0);
+    ledcWrite(2, duty);  // Left motor forward
+    ledcWrite(3, 0);
+    currentState = LEFT;
+  } else {
+    // Opposite configuration for right turn
+    ledcWrite(0, 0);
+    ledcWrite(1, duty);  // Right motor forward
+    ledcWrite(2, 0);
+    ledcWrite(3, duty);  // Left motor backward
+    currentState = RIGHT;
+  }
+
   robotMoving = true;
+
+#ifdef DEBUG
+  Serial.printf("Turning %s at %d%% speed (duty %d)\n",
+                direction == LEFT ? "LEFT" : "RIGHT",
+                speedPercent, duty);
+#endif
 }
 
-void turnRight() {
-  enableMotors();
-  digitalWrite(RPWM1, LOW);
-  digitalWrite(LPWM1, HIGH);
-  digitalWrite(RPWM2, LOW);
-  digitalWrite(LPWM2, HIGH);
-  currentState = RIGHT;
-  robotMoving = true;
+// ------------------ Servo persistence helper -------------------
+// Save current servo positions to flash
+void saveServoAngles() {
+  prefs.putInt("frontPos", frontSweepPos);
+  prefs.putInt("rearPos", rearSweepPos);
+
+#ifdef DEBUG
+  Serial.printf("Saved servo angles: front=%d, rear=%d\n", frontSweepPos, rearSweepPos);
+#endif
+}
+
+// Restore servo positions from flash
+void restoreServoAngles() {
+  frontSweepPos = prefs.getInt("frontPos", 90);
+  rearSweepPos = prefs.getInt("rearPos", 90);
+
+  setDS3218Angle(FRONT_LEFT_CH, frontSweepPos);
+  setDS3218Angle(FRONT_RIGHT_CH, 180 - frontSweepPos);
+  setDS3218Angle(REAR_LEFT_CH, rearSweepPos);
+  setTD8120Angle(REAR_RIGHT_CH, 180 - rearSweepPos);
+
+#ifdef DEBUG
+  Serial.printf("Restored servo angles: front=%d, rear=%d\n", frontSweepPos, rearSweepPos);
+#endif
 }
 
 // ---------------------- Ultrasonic helper ----------------------
+// Read distance from an ultrasonic sensor
 long readUltrasonic(int trigPin, int echoPin) {
   digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
+
   digitalWrite(trigPin, HIGH);
   delayMicroseconds(10);
   digitalWrite(trigPin, LOW);
-  long duration = pulseIn(echoPin, HIGH, 30000);
-  return duration * 0.034 / 2;
+
+  long duration = pulseIn(echoPin, HIGH, 30000);  // timeout 30ms
+  long distance = duration * 0.034 / 2;           // convert to cm
+
+#ifdef DEBUG
+  Serial.printf("Ultrasonic trig=%d echo=%d -> %ld cm\n", trigPin, echoPin, distance);
+#endif
+
+  return distance;
 }
 
 // ---------------------- Setup ----------------------
 void setup() {
+#ifdef DEBUG
   Serial.begin(115200);
-  Serial.println("Robot Init with Staircase Flag...");
+  Serial.println("Robot setup starting...");
+#endif
 
-  // Motor pins
-  pinMode(RPWM1, OUTPUT);
-  digitalWrite(RPWM1, LOW);
-  pinMode(LPWM1, OUTPUT);
-  digitalWrite(LPWM1, LOW);
-  pinMode(RPWM2, OUTPUT);
-  digitalWrite(RPWM2, LOW);
-  pinMode(LPWM2, OUTPUT);
-  digitalWrite(LPWM2, LOW);
-
-  pinMode(EN1_R, OUTPUT);
-  digitalWrite(EN1_R, LOW);
-  pinMode(EN1_L, OUTPUT);
-  digitalWrite(EN1_L, LOW);
-  pinMode(EN2_R, OUTPUT);
-  digitalWrite(EN2_R, LOW);
-  pinMode(EN2_L, OUTPUT);
-  digitalWrite(EN2_L, LOW);
-
-  // Servo driver
+  // --- PWM driver ---
   pwm.begin();
-  pwm.setPWMFreq(50);
+  pwm.setPWMFreq(50);  // 50 Hz for servos
 
-  // Initialize servos to safe mid positions
-  setDS3218Angle(FRONT_LEFT_CH, 90);
-  setDS3218Angle(FRONT_RIGHT_CH, 90);
-  setDS3218Angle(REAR_LEFT_CH, 90);
-  setTD8120Angle(REAR_RIGHT_CH, 90);
+  // --- Motor driver pins ---
+  pinMode(EN1_L, OUTPUT);
+  pinMode(EN1_R, OUTPUT);
+  pinMode(EN2_L, OUTPUT);
+  pinMode(EN2_R, OUTPUT);
 
-  // Ultrasonic pins
+  // --- Ultrasonic pins ---
   pinMode(trigFront, OUTPUT);
   pinMode(echoFront, INPUT);
   pinMode(trigRear, OUTPUT);
   pinMode(echoRear, INPUT);
 
-  // Bump sensors
-  pinMode(bumpLeft, INPUT);
-  pinMode(bumpRight, INPUT);
+  // --- Bump sensors ---
+  pinMode(bumpLeft, INPUT_PULLUP);
+  pinMode(bumpRight, INPUT_PULLUP);
 
-  // Bluetooth
-  SerialBT.begin("Robot | StairDoc");
-  Serial.println("Bluetooth ready. Motors OFF, servos initialized.");
+  // --- Bluetooth ---
+  SerialBT.begin("ESP32Robot");
 
-  // MPU6050 init
-  Wire.begin(21, 22, 400000);
+  // --- Preferences ---
+  prefs.begin("servoStore", false);
+
+  // --- MPU6050 ---
+  Wire.begin();
   byte status = mpu.begin();
   if (status == 0) {
     mpuActive = true;
     mpu.calcOffsets();
-    Serial.println("MPU6050 active.");
+#ifdef DEBUG
+    Serial.println("MPU6050 initialized");
+#endif
   } else {
-    Serial.println("MPU6050 not responding. Pitch override disabled.");
+#ifdef DEBUG
+    Serial.println("MPU6050 not found");
+#endif
   }
 
-  // Staircase flag logic
+  // --- Staircase flag ---
   if (nearStaircase) {
-    obstacleThreshold = 3;  // tighter threshold
-    Serial.println("Near staircase: threshold set to 3 cm, bump disabled.");
-  } else {
-    obstacleThreshold = 20;  // normal threshold
-    Serial.println("Normal mode: threshold set to 20 cm, bump enabled.");
+    obstacleThreshold = 3;
+#ifdef DEBUG
+    Serial.println("Near staircase: threshold set to 3 cm");
+#endif
   }
 
-  // HX711 init (commented out)
-  // scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
-  // scale.set_scale();
-  // scale.tare();
+  // --- Restore servo angles only if flat ---
+  if (mpuActive) {
+    mpu.update();
+    pitch = mpu.getAngleY();
+    if (abs(pitch) < 10) {
+      restoreServoAngles();
+    } else {
+#ifdef DEBUG
+      Serial.println("Robot not flat, skipping servo restore");
+#endif
+    }
+  } else {
+    restoreServoAngles();  // fallback if MPU not active
+  }
+
+  // --- HX711 initialization ---
+  hx711.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+  hx711.set_scale();
+  hx711.tare();
+#ifdef DEBUG
+  Serial.println("HX711 initialized and tared");
+#endif
+
+  stopMotors();  // ensure motors are off at startup
+
+#ifdef DEBUG
+  Serial.println("Setup complete");
+#endif
+
+  //   // --- HX711 initialization ---
+  // hx711.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+  // hx711.set_scale(calibrationFactor);
+  // hx711.tare();
+  // #ifdef DEBUG
+  // Serial.println("HX711 initialized and tared");
+  // #endif
 }
 
 // ---------------------- Loop ----------------------
 void loop() {
   unsigned long now = millis();
 
-  // MPU6050 pitch update
+  // --- Update MPU6050 ---
   if (mpuActive) {
     mpu.update();
     pitch = mpu.getAngleY();
-    Serial.print("Pitch: ");
-    Serial.println(pitch);
+
+#ifdef DEBUG
+    Serial.printf("Pitch: %.2f\n", pitch);
+#endif
   }
 
-  // Ultrasonic obstacle check (every 100ms when moving)
-  if (robotMoving && now - lastMotionUltrasonicRead >= 100) {
-    frontDist = readUltrasonic(trigFront, echoFront);
-    rearDist = readUltrasonic(trigRear, echoRear);
-    Serial.printf("Front: %ld cm | Rear: %ld cm\n", frontDist, rearDist);
-    lastMotionUltrasonicRead = now;
+  // --- Ultrasonic obstacle check ---
+  if (robotMoving) {
+    if (now - lastUltrasonicCheck >= 200) {  // faster when moving
+      frontDist = readUltrasonic(trigFront, echoFront);
+      rearDist = readUltrasonic(trigRear, echoRear);
+
+#ifdef DEBUG
+      Serial.printf("Front: %ld cm | Rear: %ld cm\n", frontDist, rearDist);
+#endif
+
+      lastUltrasonicCheck = now;
+    }
+  } else {
+    if (now - lastUltrasonicCheck >= 1000) {  // slower when idle
+      frontDist = readUltrasonic(trigFront, echoFront);
+      rearDist = readUltrasonic(trigRear, echoRear);
+      lastUltrasonicCheck = now;
+    }
   }
 
-  // Bluetooth commands
+  // --- Bluetooth commands ---
   if (SerialBT.available()) {
     command = SerialBT.read();
     lastCmdTime = now;
+
+#ifdef DEBUG
     Serial.printf("BT command: %c\n", command);
+#endif
 
     // Servo sweep commands set target step
     if (command == 'u') {
@@ -371,60 +560,73 @@ void loop() {
     } else if (command == 'e') {
       sweepingRear = true;
       rearSweepEnd = getTargetStep(rearSweepPos, false, false);
-    } else if (command == 'f') moveForward();
-    else if (command == 'b') moveBackward();
-    else if (command == 'l') turnLeft();
-    else if (command == 'r') turnRight();
-    else if (command == 's') stopMotors();
-  }
-
-  // Safety: obstacle detection
-  if (robotMoving) {
-    if (frontDist > 0 && frontDist < obstacleThreshold && currentState == FORWARD) {
-      Serial.println("Obstacle in front! Stopping.");
+    } else if (command == 'f') {
+      moveForward();
+    } else if (command == 'b') {
+      moveBackward();
+    } else if (command == 'l') {
+      turn(LEFT);  // unified turn helper
+    } else if (command == 'r') {
+      turn(RIGHT);  // unified turn helper
+    } else if (command == 's') {
       stopMotors();
     }
-    if (rearDist > 0 && rearDist < obstacleThreshold && currentState == BACKWARD) {
-      Serial.println("Obstacle in rear! Stopping.");
-      stopMotors();
-    }
-  }
 
-  // Safety: bump sensors (disabled near staircase)
-  if (!nearStaircase) {
-    if (digitalRead(bumpLeft) == LOW || digitalRead(bumpRight) == LOW) {
-      if (!bumpRecovering) {
+    // --- Safety: obstacle detection ---
+    if (robotMoving) {
+      if (frontDist > 0 && frontDist < obstacleThreshold && currentState == FORWARD) {
         stopMotors();
-        moveBackward();
-        bumpTime = now;
-        bumpRecovering = true;
+#ifdef DEBUG
+        Serial.println("Obstacle in front! Stopping.");
+#endif
+      }
+      if (rearDist > 0 && rearDist < obstacleThreshold && currentState == BACKWARD) {
+        stopMotors();
+#ifdef DEBUG
+        Serial.println("Obstacle in rear! Stopping.");
+#endif
       }
     }
-    if (bumpRecovering && now - bumpTime >= 1000) {  // 1s recovery
+
+    // --- Safety: bump sensors ---
+    if (!nearStaircase) {
+      if (digitalRead(bumpLeft) == LOW || digitalRead(bumpRight) == LOW) {
+        if (!bumpRecovering) {
+          stopMotors();
+          moveBackward();  // recovery motion preserved
+          bumpTime = now;
+          bumpRecovering = true;
+        }
+      }
+      if (bumpRecovering && now - bumpTime >= 1000) {  // 1s recovery
+        stopMotors();
+        bumpRecovering = false;
+      }
+    }
+
+    // --- Safety: pitch override ---
+    static unsigned long pitchStart = 0;
+    if (mpuActive) {
+      if (abs(pitch) > 50 && !pitchOverride) {
+        moveForward();  // old behavior preserved
+        pitchOverride = true;
+        pitchStart = now;
+      }
+      if (pitchOverride && now - pitchStart >= 1000) {  // 1s forward
+        stopMotors();
+        pitchOverride = false;
+      }
+    }
+
+    // --- Safety: command timeout ---
+    if (now - lastCmdTime > timeout) {
       stopMotors();
-      bumpRecovering = false;
+#ifdef DEBUG
+      Serial.println("Command timeout triggered");
+#endif
     }
-  }
 
-  // Safety: pitch override (non-blocking, 1s forward)
-  static unsigned long pitchStart = 0;
-  if (mpuActive) {
-    if (abs(pitch) > 50 && !pitchOverride) {
-      moveForward();
-      pitchOverride = true;
-      pitchStart = now;
-    }
-    if (pitchOverride && now - pitchStart >= 1000) {  // 1s forward
-      stopMotors();
-      pitchOverride = false;
-    }
+    // --- Sweep updates ---
+    updateSweeps();
   }
-
-  // Safety: command timeout
-  if (now - lastCmdTime > timeout) {
-    stopMotors();
-  }
-
-  // Update sweeps
-  updateSweeps();
 }
